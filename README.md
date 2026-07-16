@@ -10,7 +10,7 @@ Social platform take-home: Laravel API, Python embeddings, React Native feed, an
 | `embedding-service/` | FastAPI mock embedding microservice |
 | `mobile/` | Expo React Native feed screen |
 | `sql/` | Part D raw SQL queries |
-| `docs/TSD.md` | Technical solution document (Part B) |
+| `docs/TSD.md`, `docs/TSD.pdf` | Technical solution document (Part B) |
 | `scripts/verify-all.sh` | One-command verification |
 
 ## Prerequisites

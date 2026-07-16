@@ -1,109 +1,474 @@
-# Guised Up — Technical Solution Document
+Technical Solution Document (TSD)
 
-## Overview
+# 1. Feature: Real Connections Feed
 
-Guised Up is a social feed where ranking blends **authenticity**, **relationship depth**, **semantic similarity**, and **time decay**. The stack:
+## Objective
 
-- **Laravel 11** — REST API, auth, business logic, feed SQL
-- **PostgreSQL + pgvector** — relational data + vector search in one database
-- **FastAPI** — embedding microservice (mock in dev, swappable to sentence-transformers)
-- **Expo React Native** — single feed screen consuming the API
+The goal of the Real Connections Feed is to provide users with a personalized social feed that prioritizes meaningful content instead of popularity. Unlike traditional social media platforms where posts are ranked based on likes, shares, or comments, this feed focuses on genuine relationships, authentic content, user interests, and recency.
 
-## Architecture
+The feed ranking is based on four main factors:
 
-```
-Mobile (Expo) ──HTTP──► Laravel API (:8000)
-                            │
-                            ├── PostgreSQL (users, posts, follows, interactions, vectors)
-                            └── HTTP ──► Embedding service (:8001) POST /embed
-```
+- Authenticity of the post
 
-## Vector database choice: pgvector
+- Relationship depth between users
 
-**Chosen:** PostgreSQL with the `pgvector` extension.
+- Semantic similarity using AI embeddings
 
-**Why not Pinecone / Weaviate / Qdrant / Chroma?**
+- Time decay
 
-| Factor | pgvector |
-|--------|----------|
-| Ops | One database for posts, users, interactions, and vectors |
-| Transactions | Post + embedding insert in same DB connection |
-| Joins | Feed ranking SQL can combine relational signals and `<=>` cosine distance |
-| Take-home fit | Migrations + raw SQL challenge stay in one dialect |
-| Trade-off | IVFFlat index needs tuning at scale; fine for this scope |
+The application consists of a React Native mobile app, Laravel PHP backend, Python AI service, SQL database, and a Vector Database for semantic search.
 
-Embeddings are stored as `vector(384)` on `posts.embedding`, with an IVFFlat cosine index created when rows exist.
+![Architecture diagram](media/image1.png)
 
-## Embeddings
+# 2. Database Schema Design
 
-**Current:** deterministic SHA-256 → seeded NumPy vector (384-d, unit length) in `embedding-service/main.py`.
+## Users
 
-**Production swap:** uncomment `sentence-transformers` (`all-MiniLM-L6-v2`, 384 dims) or call OpenAI embeddings API. Laravel calls `POST /embed` via `EmbeddingService` and inserts with `CAST(? AS vector)`.
+| Column        | Type      |
+|---------------|-----------|
+| id            | BIGINT    |
+| name          | VARCHAR   |
+| email         | VARCHAR   |
+| profile_image | VARCHAR   |
+| created_at    | TIMESTAMP |
 
-## Authenticity score
+Index
 
-Heuristic in `AuthenticityScorer` (0–1):
+- Primary Key (id)
 
-- Bonus for natural-length text (80–400 chars)
-- Penalty for very short text, many hashtags, high emoji density
-- Penalty for `image_url` with ≥4 query params (heavy filter/CDN signal)
+- Email (Unique)
 
-Stored on `posts.authenticity_score` at creation time.
+## Posts
 
-## Feed ranking
+| Column             | Type      |
+|--------------------|-----------|
+| id                 | BIGINT    |
+| user_id            | BIGINT    |
+| caption            | TEXT      |
+| image_url          | VARCHAR   |
+| authenticity_score | FLOAT     |
+| created_at         | TIMESTAMP |
 
-**Endpoint:** `GET /api/feed` — 20 posts per page.
+Indexes
 
-**Candidates:** posts from users the viewer **follows** OR **interacted with** in the last 30 days.
+- user_id
 
-**Score** (weights sum to 1.0):
+- created_at
 
-| Signal | Weight | Source |
-|--------|--------|--------|
-| Authenticity | 0.25 | `posts.authenticity_score` |
-| Relationship depth | 0.30 | Normalized interaction count viewer→author (30d), cap at 20 |
-| Semantic similarity | 0.30 | `1 - (post.embedding <=> viewer_interest_vector)` via pgvector |
-| Time decay | 0.15 | `exp(-age_hours / 48)` |
+## User_Interactions
 
-**Viewer interest vector:** average embedding of the viewer's last 10 own posts + interacted posts. If none, semantic term is 0.
+Stores meaningful interactions between users.
 
-Implemented in one raw SQL query in `FeedRankingService::paginate()`.
+| Column           | Type      |
+|------------------|-----------|
+| id               | BIGINT    |
+| user_id          | BIGINT    |
+| target_user_id   | BIGINT    |
+| interaction_type | VARCHAR   |
+| created_at       | TIMESTAMP |
 
-## Search
+Examples:
 
-`GET /api/search?q=` embeds the query via the Python service, then:
+- Direct Message
 
-```sql
-ORDER BY posts.embedding <=> :query_vector LIMIT 10
-```
+- Reply
 
-## Auth
+- Mention
 
-Laravel Sanctum bearer tokens. Seeded users: `alice@test.com`, `bob@test.com` (password: `password`).
+- Profile Visit
 
-## Schema (high level)
+- Conversation
 
-- `users` — accounts
-- `posts` — text, optional image_url, embedding, authenticity_score
-- `follows` — follower_id, followee_id (unique pair)
-- `interactions` — user_id, post_id, type (`view`|`reply`|`reaction`)
+Indexes
 
-## Tests
+- user_id
 
-| Suite | Coverage |
-|-------|----------|
-| `FeedTest` | Auth required, pagination |
-| `SearchTest` | Semantic ordering with mocked embed |
-| `InteractionFeedRankingTest` | Interactions boost relationship depth in feed |
-| `PostStoreTest` | Post creation stores embedding |
-| `embedding-service` pytest | 384 dims, determinism |
+- target_user_id
 
-Run: `./scripts/verify-all.sh`
+## Relationships
 
-## Mobile
+| Column             | Type   |
+|--------------------|--------|
+| user_id            | BIGINT |
+| connected_user_id  | BIGINT |
+| relationship_score | FLOAT  |
 
-Single `FeedScreen`: auto-login as Alice, infinite scroll feed, debounced search, optimistic reactions, loading/empty/error states. API base URL via `EXPO_PUBLIC_API_URL`.
+The relationship score increases based on meaningful interactions instead of simply following another user.
 
-## SQL analytics
+## Post_Embeddings
 
-Part D queries in `sql/queries.sql` — D1–D4 with efficiency notes and captured outputs.
+| Column    | Type    |
+|-----------|---------|
+| post_id   | BIGINT  |
+| vector_id | VARCHAR |
+
+The actual embedding vector is stored in the vector database.
+
+## Database Relationships
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>Users</p>
+<p>|</p>
+<p>|--- 1 : N ---&gt; Posts</p>
+<p>|</p>
+<p>|--- 1 : N ---&gt; User_Interactions</p>
+<p>|</p>
+<p>+--- N : N ---&gt; Relationships</p>
+<p>Posts</p>
+<p>|</p>
+<p>+--- 1 : 1 ---&gt; Post_Embeddings</p></td>
+</tr>
+</tbody>
+</table>
+
+# 3. Vector Embeddings
+
+## Why Use Vector Embeddings?
+
+Traditional SQL searches depend on keyword matching. This often fails when users use different words with the same meaning.
+
+Example:
+
+Search:
+
+> *“Funny travel stories”*
+
+A normal keyword search may not return a post saying:
+
+> *“Our hilarious Goa vacation.”*
+
+Even though both have the same meaning.
+
+Embeddings convert text into numerical vectors that represent semantic meaning rather than exact words.
+
+## Embedding Model
+
+I would use OpenAI's text-embedding-3-small model.
+
+### Reasons
+
+- High semantic accuracy
+
+- Fast response time
+
+- Cost-effective
+
+- Easy integration with Python
+
+- Suitable for recommendation systems
+
+## Vector Database
+
+I would use Qdrant.
+
+### Why Qdrant?
+
+- Open source
+
+- Excellent vector similarity search
+
+- REST API support
+
+- Easy integration with Laravel and Python
+
+- Fast performance even with large datasets
+
+- Simple deployment using Docker
+
+## Embedding Workflow
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>User creates a post</p>
+<p>|</p>
+<p>v</p>
+<p>Laravel stores post</p>
+<p>|</p>
+<p>v</p>
+<p>Python generates embedding</p>
+<p>|</p>
+<p>v</p>
+<p>Embedding stored in Qdrant</p>
+<p>|</p>
+<p>v</p>
+<p>Vector ID stored in SQL</p></td>
+</tr>
+</tbody>
+</table>
+
+# 4. API Design
+
+## Authentication
+
+JWT Token Authentication
+
+Example Header
+
+|                                     |
+|-------------------------------------|
+| Authorization: Bearer \<JWT_TOKEN\> |
+
+## Get Personalized Feed
+
+GET /api/feed
+
+### Response
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>{</p>
+<p>"posts": [</p>
+<p>{</p>
+<p>"id": 101,</p>
+<p>"author": "John",</p>
+<p>"caption": "Weekend hiking adventure!",</p>
+<p>"score": 0.92</p>
+<p>}</p>
+<p>]</p>
+<p>}</p></td>
+</tr>
+</tbody>
+</table>
+
+## Create Post
+
+POST /api/posts
+
+### Request
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>{</p>
+<p>"caption": "Beautiful sunset today",</p>
+<p>"image_url": "image.jpg"</p>
+<p>}</p></td>
+</tr>
+</tbody>
+</table>
+
+## Natural Language Search
+
+POST /api/feed/search
+
+### Request
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>{</p>
+<p>"query": "funny travel stories from last week"</p>
+<p>}</p></td>
+</tr>
+</tbody>
+</table>
+
+### Response
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>{</p>
+<p>"results": [</p>
+<p>{</p>
+<p>"id": 45,</p>
+<p>"caption": "Our funniest Goa trip",</p>
+<p>"similarity": 0.94</p>
+<p>}</p>
+<p>]</p>
+<p>}</p></td>
+</tr>
+</tbody>
+</table>
+
+## Record User Interaction
+
+POST /api/interactions
+
+### Request
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>{</p>
+<p>"target_user_id": 20,</p>
+<p>"interaction_type": "reply"</p>
+<p>}</p></td>
+</tr>
+</tbody>
+</table>
+
+# 5. Feed Ranking Algorithm
+
+## Ranking Logic (Plain English)
+
+Each post is assigned a score using four ranking factors.
+
+### 1. Authenticity Score
+
+Posts that appear more genuine receive higher priority.
+
+Examples include:
+
+- Minimal image filters
+
+- Natural-looking photos
+
+- Personal stories
+
+- Honest captions
+
+Overly edited or promotional content receives a lower score.
+
+### 2. Relationship Depth
+
+The system measures how closely two users interact.
+
+Factors include:
+
+- Direct messages
+
+- Replies
+
+- Conversations
+
+- Profile visits
+
+- Frequent interactions
+
+Simply following another user should not significantly increase ranking.
+
+### 3. Semantic Similarity
+
+Every user has an interest profile generated from:
+
+- Previous searches
+
+- Viewed posts
+
+- Liked posts
+
+- Saved content
+
+Each post also has an embedding.
+
+The closer the user's embedding is to the post embedding, the higher the relevance score.
+
+### 4. Time Decay
+
+Recent posts receive a small boost.
+
+However, highly relevant posts should still appear above newer but less relevant posts.
+
+## Final Ranking Formula
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>Final Score =</p>
+<p>40% Relationship Score</p>
+<p>+ 30% Semantic Similarity</p>
+<p>+ 20% Authenticity Score</p>
+<p>+ 10% Time Decay</p></td>
+</tr>
+</tbody>
+</table>
+
+## Pseudocode
+
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td><p>for each candidate post</p>
+<p>relationshipScore = calculateRelationship(user, author)</p>
+<p>semanticScore = cosineSimilarity(</p>
+<p>userEmbedding,</p>
+<p>postEmbedding</p>
+<p>)</p>
+<p>authenticityScore = calculateAuthenticity(post)</p>
+<p>freshnessScore = calculateTimeDecay(post)</p>
+<p>finalScore =</p>
+<p>relationshipScore * 0.40</p>
+<p>+ semanticScore * 0.30</p>
+<p>+ authenticityScore * 0.20</p>
+<p>+ freshnessScore * 0.10</p>
+<p>sort all posts by finalScore</p>
+<p>return ranked feed</p></td>
+</tr>
+</tbody>
+</table>
+
+# 6. AI Agentic Tools Used
+
+To improve development speed while maintaining code quality, I would use the following AI-assisted tools:
+
+### ChatGPT
+
+- Brainstorming the overall architecture
+
+- Designing the database schema
+
+- Drafting API structures
+
+- Refining the feed ranking logic
+
+- Preparing technical documentation
+
+### GitHub Copilot
+
+- Generating boilerplate Laravel and React Native code
+
+- Creating CRUD operations
+
+- Assisting with repetitive coding tasks
+
+- Writing unit test templates
+
+### Cursor AI
+
+- Understanding unfamiliar code
+
+- Refactoring existing functions
+
+- Suggesting optimizations
+
+- Detecting potential bugs
+
+### Why Use These Tools?
+
+These AI tools help reduce development time by handling repetitive work and providing implementation suggestions. However, every generated solution would still be reviewed, tested, and validated before being merged into production to ensure correctness, security, and maintainability.
+
+# Conclusion
+
+The proposed solution builds a personalized feed that values meaningful relationships over popularity. By combining relationship depth, authenticity signals, semantic understanding through vector embeddings, and time-based relevance, the platform delivers a more genuine and engaging user experience. The architecture is modular, scalable, and designed to support future AI-driven enhancements while maintaining clean separation between the mobile application, backend services, AI processing, and data storage.
